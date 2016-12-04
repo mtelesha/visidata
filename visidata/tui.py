@@ -19,15 +19,35 @@ from curses.ascii import DEL
 class EscapeException(Exception):
     pass
 
-def ctrl(ch):
-    return ord(ch) & 31  # convert from 'a' to ^A keycode
+class CtrlKey:
+    def __getattr__(self, k):  # Ctrl.a or Ctrl.A -> ^A keycode
+        return ord(k) & 31
+    def __call__(self, k):   # Ctrl('^') -> Ctrl-^ keycode
+        return ord(k) & 31
+Ctrl = CtrlKey()
+
+class ShiftKey:
+    def __getattr__(self, k):  # Ctrl.a or Ctrl.A -> ^A keycode
+        assert curses.ascii.isupper(k)
+        return ord(k)
+Shift = ShiftKey()
+
+class PlainKey(object):
+    TAB = Ctrl.I
+    ENTER = Ctrl.J
+    ESC = 27
+    def __getattr__(self, k):
+        if len(k) == 1 and ord(k) < 127:
+            return ord(k)
+        return getattr(curses, 'KEY_' + k)
+    def __call__(self, k):
+        assert len(k) == 1 and ord(k) < 127
+        return ord(k)
+Key = PlainKey()
 
 def keyname(ch):
     return curses.keyname(ch).decode('utf-8')
 
-ENTER = ctrl('j')
-ESC = 27
-TAB = 9
 
 def editText(scr, y, x, w, attr=curses.A_NORMAL, value='', fillchar=' ', unprintablechar='.'):
     def splice(v, i, s):  # splices s into the string v at i (v[i] = s[0])
@@ -52,20 +72,20 @@ def editText(scr, y, x, w, attr=curses.A_NORMAL, value='', fillchar=' ', unprint
         scr.addstr(y, x, dispval, attr)
         scr.move(y, x+dispi)
         ch = scr.getch()
-        if ch == curses.KEY_IC:                             insert_mode = not insert_mode
-        elif ch == ctrl('a') or ch == curses.KEY_HOME:      i = 0
-        elif ch == ctrl('b') or ch == curses.KEY_LEFT:      i -= 1
-        elif ch == ctrl('c') or ch == ESC:                  raise EscapeException(keyname(ch))
-        elif ch == ctrl('d') or ch == curses.KEY_DC:        v = delchar(v, i)
-        elif ch == ctrl('e') or ch == curses.KEY_END:       i = len(v)
-        elif ch == ctrl('f') or ch == curses.KEY_RIGHT:     i += 1
-        elif ch in (ctrl('h'), curses.KEY_BACKSPACE, DEL):  i -= 1 if i > 0 else 0; v = delchar(v, i)
-        elif ch == ctrl('j') or ch == ENTER:                break
-        elif ch == ctrl('k'):                               v = v[:i]
-        elif ch == ctrl('r'):                               v = value
-        elif ch == ctrl('t'):                               v = delchar(splice(v, i-2, v[i-1]), i)
-        elif ch == ctrl('u'):                               v = v[i:]; i = 0
-        elif ch == ctrl('v'):                               v = splice(v, i, chr(scr.getch())); i += 1
+        if ch == Key.IC:                             insert_mode = not insert_mode
+        elif ch == Ctrl.A or ch == Key.HOME:         i = 0
+        elif ch == Ctrl.B or ch == Key.LEFT:         i -= 1
+        elif ch == Ctrl.C or ch == Key.ESC:          raise EscapeException(keyname(ch))
+        elif ch == Ctrl.D or ch == Key.DC:           v = delchar(v, i)
+        elif ch == Ctrl.E or ch == Key.END:          i = len(v)
+        elif ch == Ctrl.F or ch == Key.RIGHT:        i += 1
+        elif ch in (Ctrl.H, Key.BACKSPACE, DEL):     i -= 1 if i > 0 else 0; v = delchar(v, i)
+        elif ch == Ctrl.J or ch == Key.ENTER:        break
+        elif ch == Ctrl.K:                           v = v[:i]
+        elif ch == Ctrl.R:                           v = value
+        elif ch == Ctrl.T:                           v = delchar(splice(v, i-2, v[i-1]), i)
+        elif ch == Ctrl.U:                           v = v[i:]; i = 0
+        elif ch == Ctrl.V:                           v = splice(v, i, chr(scr.getch())); i += 1
         else:
             if insert_mode:
                 v = splice(v, i, chr(ch))
