@@ -13,165 +13,75 @@
 #   You should have received a copy of the GNU General Public License
 #   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import curses
 import unittest
-from curses.ascii import DEL
 from unittest import skip
 from unittest.mock import Mock, patch
 
-from visidata.tui import editText, EscapeException, ENTER, ESC, ctrl
-
-from .mocks import WindowObject
-
+from visidata.tui import editText, EscapeException, Key, Ctrl, DEL
 
 class EditTextTestCase(unittest.TestCase):
     def setUp(self):
-        self.scr = WindowObject()
+        self.scr = Mock()
         self.scr.addstr = Mock()
         self.scr.move = Mock()
-        self.scr.getch = Mock(side_effect=[ENTER])
+        self.chars=[]
+        self.scr.getch = Mock(side_effect=self.chars)
 
     def mock_getch(self, *chars):
-        self.scr.getch = Mock(side_effect=chars)
+        self.chars.extend(chars)
 
-    def test_simple(self):
-        """
-        Simple test to check mocks.
-        """
-        self.scr.getch = Mock(side_effect=[ENTER])
-        result = editText(self.scr, 0, 0, 0)
+    def t(self, *keys, result=None, exception=None, **kwargs):
+        for k in keys:
+            if isinstance(k, str):
+                for ch in k:
+                    self.mock_getch(ord(ch))
+            else:
+                self.mock_getch(k)
+        if exception:
+            with self.assertRaises(exception):
+                editText(self.scr, 0, 0, 0, **kwargs)
+        else:
+            r = editText(self.scr, 0, 0, 0, **kwargs)
+            self.assertEqual(r, result)
 
-        self.assertEqual(result, "")
+    def tests(self):
+        self.t(Key.ENTER, result='')
+        self.t(Key.IC, 'ab', Key.HOME, 'cd', Ctrl.A, 'ef', Key.ENTER, result='efcdab')
+        self.t(Key.IC, 'ab', Key.LEFT, '1', Key.LEFT, Key.LEFT, Key.LEFT, '2', Key.ENTER, result='2a1b') # Left, past home
+        self.t(Key.IC, 'ab', Ctrl.C, exception=EscapeException)
+        self.t(Key.IC, 'ab', Key.ESC, exception=EscapeException)
+        self.t(Key.IC, 'a', Key.DC, Key.ENTER, result='a')
+        self.t(Key.IC, 'ab', Key.LEFT, Key.DC, Key.ENTER, result='a')
+        self.t(Key.IC, 'ab', Key.LEFT, 'c', Key.END, 'd', Key.ENTER, result='acbd')
+        self.t(Key.IC, 'ab', Key.HOME, Key.RIGHT, 'c', Key.ENTER, result='acb')
+        self.t(Key.IC, 'ab', Key.BACKSPACE, 'c', Key.ENTER, result='ac')
 
-    def test_home(self):
-        self.mock_getch(curses.KEY_IC, ord('a'), ord('b'), curses.KEY_HOME,
-                        ord('c'), ord('d'), ctrl('a'),
-                        ord('e'), ord('f'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
+        # Backspace deletes the first character at the start
+        self.t(Key.IC, 'ab', Key.HOME, Key.BACKSPACE, 'c', Key.ENTER, result='cb')
 
-        self.assertEqual(result, "efcdab")
+        # Backspace works in different combos, including on the mac.
+        self.t('abc', Key.BACKSPACE, Ctrl.H, DEL, Key.ENTER, result='')
 
-    def test_left(self):
-        self.mock_getch(curses.KEY_IC, ord('a'), ord('b'), curses.KEY_LEFT, ord('1'),
-                        # Left past home
-                        curses.KEY_LEFT, curses.KEY_LEFT, curses.KEY_LEFT,
-                        ord('2'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
+        # ^J works the same way as ENTER.
+        self.t('abc', Ctrl.J, result='abc')
 
-        self.assertEqual(result, "2a1b")
+        self.t('abc', Ctrl.B, Ctrl.B, Ctrl.K, Key.ENTER, result='a')
 
-    def test_escape(self):
-        self.mock_getch(ord('a'), ord('b'), ctrl('c'))
-        with self.assertRaisesRegex(EscapeException, '\^C'), patch('curses.keyname', return_value=b'^C'):
-            editText(self.scr, 0, 0, 0)
+        self.t('a', Ctrl.R, Key.ENTER, result='')
+        self.t('a', Ctrl.R, Key.ENTER, value='foo', result='foo')
 
-        self.mock_getch(ord('a'), ord('b'), ESC)
-        with self.assertRaisesRegex(EscapeException, 'xxx'), patch('curses.keyname', return_value=b'xxx'):
-            editText(self.scr, 0, 0, 0)
+        # With one character is a no-op
+        #self.t('a', Ctrl.T, Key.ENTER, result='a')
 
-    def test_delchar(self):
-        self.mock_getch(ord('a'), curses.KEY_DC, ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'a')
+        # Two characters swaps characters
+        self.t('ab', Ctrl.T, Key.ENTER, result='ba')
 
-        self.mock_getch(ord('a'), ord('b'), curses.KEY_LEFT, curses.KEY_DC, ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'a')
+        # Home with multiple characters acts like delete
+        self.t('ab', Key.HOME, Ctrl.T, Key.ENTER, result='b')
 
-    def test_end(self):
-        self.mock_getch(curses.KEY_IC, ord('a'), ord('b'), curses.KEY_LEFT, ord('c'), curses.KEY_END, ord('d'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'acbd')
-
-    def test_right(self):
-        self.mock_getch(ord('a'), ord('b'), curses.KEY_HOME, curses.KEY_RIGHT, curses.KEY_IC, ord('c'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'acb')
-
-    def test_backspace(self):
-        self.mock_getch(ord('a'), ord('b'), curses.KEY_BACKSPACE, ord('c'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'ac')
-
-    def test_backspace_first(self):
-        """
-        Backspace deletes the first character at the start
-        """
-        self.mock_getch(curses.KEY_IC, ord('a'), ord('b'), curses.KEY_HOME, curses.KEY_BACKSPACE, ord('c'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'cb')
-
-    def test_backspace_types(self):
-        """
-        Backspace works in different combos, including on the mac.
-        """
-        self.mock_getch(ord('a'), ord('b'), ord('c'), curses.KEY_BACKSPACE, ctrl('h'), DEL, ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, '')
-
-    def test_enter(self):
-        """
-        ^J works the same way as ENTER.
-        """
-        self.mock_getch(ord('a'), ord('b'), ord('c'), ctrl('j'))
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'abc')
-
-    def test_truncate(self):
-        self.mock_getch(ord('a'), ord('b'), ord('c'), ctrl('b'), ctrl('b'), ctrl('k'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'a')
-
-    def test_reset(self):
-        self.mock_getch(ord('a'), ctrl('r'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, '')
-
-        self.mock_getch(ord('a'), ctrl('r'), ENTER)
-        result = editText(self.scr, 0, 0, 0, value='foo')
-        self.assertEqual(result, 'foo')
-
-    def test_swap(self):
-        """
-        With one character is a no-op
-        """
-        self.mock_getch(ord('a'), ctrl('t'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'a')
-
-    def test_swap_two(self):
-        """
-        Two characters swaps characters
-        """
-        self.mock_getch(ord('a'), ord('b'), ctrl('t'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'ba')
-
-    def test_swap_home(self):
-        """
-        Home with multiple characters acts like delete
-        """
-        self.mock_getch(ord('a'), ord('b'), curses.KEY_HOME, ctrl('t'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'b')
-
-    @skip("Broken, this throws an exception")
-    def test_swap_empty(self):
-        """
-        This is a no-op
-        """
-        self.mock_getch(ctrl('t'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, '')
-
-    def test_del_front(self):
-        self.mock_getch(ord('a'), ord('b'), curses.KEY_LEFT, ctrl('u'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'b')
-
-        self.mock_getch(ord('a'), ord('b'), ctrl('u'), ord('c'), ENTER)
-        result = editText(self.scr, 0, 0, 0)
-        self.assertEqual(result, 'c')
+        #self.t(Ctrl.T, Key.ENTER, result='')
+        self.t('ab', Key.LEFT, Ctrl.U, Key.ENTER, result='b')
+        self.t('ab', Ctrl.U, 'c', Key.ENTER, result='c')
 
     # TODO: Test ctrl-V. What does it do?
     # TODO: Test value

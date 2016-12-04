@@ -75,7 +75,7 @@ def editText(scr, y, x, w, attr=curses.A_NORMAL, value='', fillchar=' ', unprint
         if ch == Key.IC:                             insert_mode = not insert_mode
         elif ch == Ctrl.A or ch == Key.HOME:         i = 0
         elif ch == Ctrl.B or ch == Key.LEFT:         i -= 1
-        elif ch == Ctrl.C or ch == Key.ESC:          raise EscapeException(keyname(ch))
+        elif ch == Ctrl.C or ch == Key.ESC:          raise EscapeException(ch)
         elif ch == Ctrl.D or ch == Key.DC:           v = delchar(v, i)
         elif ch == Ctrl.E or ch == Key.END:          i = len(v)
         elif ch == Ctrl.F or ch == Key.RIGHT:        i += 1
