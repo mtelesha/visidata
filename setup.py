@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 
-from distutils.core import setup
-try:
-    # Setuptools only needed for building the package
-    import setuptools
-except ImportError:
-    pass
+from setuptools import setup
 
 setup(name="visidata",
       version="0.29",
@@ -17,6 +12,7 @@ setup(name="visidata",
       download_url="https://raw.githubusercontent.com/saulpw/visidata/master/bin/vd",
       scripts=['bin/vd'],
       license="GPLv3",
+      test_suite="visidata.tests",
       classifiers=[
           'Development Status :: 3 - Alpha',
           'Environment :: Console',
