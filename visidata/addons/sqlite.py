@@ -4,6 +4,7 @@ def open_db(path):
     vs = SqliteSheet(path.name + '_tables', path, 'sqlite_master')
     vs.columns = vs.getColumns('sqlite_master')
     vs.command(ENTER, 'vd.push(SqliteSheet(joinSheetnames(source.name, cursorRow[1]), sheet, cursorRow[1]))', 'open this table')
+    vs.addFilter('type != "table"')
     return vs
 
 class SqliteSheet(Sheet):
@@ -23,7 +24,8 @@ class SqliteSheet(Sheet):
         self.rows = []
         for i, r in enumerate(self.conn.execute("SELECT * FROM %s" % tblname)):
             self.progressMade = i
-            self.rows.append(r)
+            if not self.isFiltered(r):
+                self.rows.append(r)
 
     def getColumns(self, table_name):
         cols = []

@@ -35,35 +35,11 @@ def splitColumn(columns, colIndex, origcol, exampleVal, ch):
             columns.insert(colIndex+i+1, (Column("%s[%s]" % (origcol.name, i), getter=lambda r,c=origcol,ch=ch,i=i,maxsplit=maxsplit: c.getValue(r)[i])))
 
 
-class LazyMapping:
-    'calculates column values as needed'
-    def __init__(self, sheet, row):
-        self.row = row
-        self.sheet = sheet
-
-    def keys(self):
-        return [c.name for c in self.sheet.columns]
-
-    def __call__(self, col):
-        return eval(col.expr, {}, self)
-
-    def __getitem__(self, colname):
-        colnames = [c.name for c in self.sheet.columns]
-        if colname in colnames:
-            colidx = colnames.index(colname)
-            return self.sheet.columns[colidx].getValue(self.row)
-        else:
-            raise KeyError(colname)
-
-    def __getattr__(self, colname):
-        return self.__getitem__(colname)
-
-
 def ColumnExpr(sheet, expr):
     if expr:
         vc = Column(expr)  # or default name?
         vc.expr = expr
-        vc.getter = lambda r,c=vc,s=sheet: LazyMapping(s, r)(c)
+        vc.getter = lambda r,c=vc,s=sheet: LazyColEval(s, r)(c.expr)
         return vc
 
 

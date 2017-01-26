@@ -480,7 +480,7 @@ class VisiData:
                 except Exception:
                     self.exceptionCaught()
             else:
-                sheet.exec_command(g_globals, self.keystrokes)
+                sheet.exec_keystrokes(g_globals, self.keystrokes)
 
             for i, task in list(enumerate(self.tasks)):
                 if not task.endTime and not task.thread.is_alive():
@@ -585,6 +585,30 @@ command('^C', 'ctype_async_raise(vd.tasks[-1].thread, EscapeException)', 'cancel
 command('^T', 'vd.push(TasksSheet("task_history", vd.tasks))', 'push task history sheet')
 
 
+class LazyColEval:
+    'calculates column values as needed'
+    def __init__(self, sheet, row):
+        self.row = row
+        self.sheet = sheet
+
+    def keys(self):
+        return [c.name for c in self.sheet.columns]
+
+    def __call__(self, exprstr):
+        return eval(exprstr, g_globals, self)
+
+    def __getitem__(self, colname):
+        colnames = [c.name for c in self.sheet.columns]
+        if colname in colnames:
+            colidx = colnames.index(colname)
+            return self.sheet.columns[colidx].getValue(self.row)
+        else:
+            raise KeyError(colname)
+
+    def __getattr__(self, colname):
+        return self.__getitem__(colname)
+
+
 class LazyMap:
     def __init__(self, keys, getter, setter):
         self._keys = keys
@@ -602,6 +626,7 @@ class LazyMap:
     def __setitem__(self, k, v):
         self._keys.append(k)
         self._setter(k, v)
+
 
 class Sheet:
     def __init__(self, name, *sources, columns=None):
@@ -629,6 +654,8 @@ class Sheet:
         self.filetype = None
         self._selectedRows = {}  # id(row) -> row
 
+        self.filters = []  # list of expression strs to eval
+
         # list of modifications [sheet, funcname, [args], {kwargs}]
         self._editlog = []
 
@@ -638,6 +665,13 @@ class Sheet:
 
     def editlog(self, funcname, *args, **kwargs):
         self._editlog.append([self, funcname, args, kwargs])
+
+    def isFiltered(self, r):
+        'if any load filter returns true, the row is not loaded.'
+        return any(LazyColEval(self, r)(f) for f in self.filters)
+
+    def addFilter(self, exprstr):
+        self.filters.append(exprstr)
 
     def command(self, keystrokes, execstr, helpstr):
         self.commands[keystrokes] = (keystrokes, helpstr, execstr)
@@ -695,7 +729,7 @@ class Sheet:
     def __repr__(self):
         return self.name
 
-    def exec_command(self, vdglobals, keystrokes):
+    def exec_keystrokes(self, vdglobals, keystrokes):
         cmd = self.commands.get(keystrokes)
         if not cmd:
             cmd = base_commands.get(keystrokes)
@@ -703,13 +737,17 @@ class Sheet:
             status('no command for "%s"' % (keystrokes))
             return
 
-        # handy globals for use by commands
         _, _, execstr = cmd
+        self.exec_command(vdglobals, execstr)
+
+
+    def exec_command(self, vdglobals, execstr, execfunc=exec):
+        # handy globals for use by commands
         self.vd = vd()
         self.sheet = self
         locs = LazyMap(dir(self), lambda k,s=self: getattr(s, k), lambda k,v,s=self: setattr(s, k, v))
         try:
-            exec(execstr, vdglobals, locs)
+            return execfunc(execstr, vdglobals, locs)
         except EscapeException as e:  # user aborted
             self.vd.status('EscapeException ' + ''.join(e.args[0:]))
         except Exception:
