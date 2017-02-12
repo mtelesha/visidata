@@ -171,7 +171,8 @@ command('e', 'cursorCol.setValue(cursorRow, editCell(cursorVisibleColIndex))', '
 command('c', 'searchColumnNameRegex(input("column name regex: ", "regex"))', 'go to visible column by regex of name')
 command('r', 'sheet.cursorRowIndex = int(input("row number: "))', 'go to row number')
 
-command('d', 'rows.pop(cursorRowIndex)', 'delete this row')
+command('ge', 'substRegexSelected(input(":s/", "regex"), cursorCol, selectedRows)', 'apply regex substitution to all selected rows on this column')
+command('d', 'delete(cursorRowIndex)', 'delete this row')
 command('gd', 'deleteSelected()', 'delete all selected rows')
 
 command('o', 'vd.push(openSource(input("open: ", "filename")))', 'open local file or url')
@@ -206,12 +207,16 @@ command('g\\', 'unselectByIdx(searchRegex(input("\\\\", type="regex"), columns=v
 command('X', 'vd.push(SheetDict("lastInputs", vd.lastInputs))', 'push last inputs sheet')
 
 command(',', 'selectBy(lambda r,c=cursorCol,v=cursorValue: c.getValue(r) == v)', 'select rows matching by this column')
+#command(',', '''addIncludeFilter('%s=="%s"' % (cursorCol.name, cursorValue)); selectRowsMatching(cursorCol, cursorValue)''', 'add filter and select only rows matching by this column')
 command('g,', 'selectBy(lambda r,v=cursorRow: r == v)', 'select all rows that match this row')
 
 command('"', 'vd.push(vd.sheets[0].copy("_selected")).rows = list(vd.sheets[0].selectedRows); vd.sheets[0]._selectedRows.clear()', 'push duplicate sheet with only selected rows')
 command('g"', 'vd.push(vd.sheets[0].copy())', 'push duplicate sheet')
 command('P', 'vd.push(copy("_sample")).rows = random.sample(rows, int(input("random population size: ")))', 'push duplicate sheet with a random sample of <N> rows')
 command('V', 'vd.push(TextSheet("%s[%s].%s" % (name, cursorRowIndex, cursorCol.name), cursorValue))', 'view readonly contents of this cell in a new sheet')
+
+command('i', 'addIncludeFilter(input("include by expr: ", type="expr"))', 'add filter by Python expression')
+command('I', 'vd.push(IncludeFiltersSheet("include_filters", include_filters))', 'push filters sheet')
 
 # VisiData uses Python native int, float, str, and adds a simple date and anytype.
 #
@@ -229,7 +234,7 @@ class date:
     'simple wrapper around datetime so it can be created from dateutil str or numeric input as time_t'
     def __init__(self, s=None):
         if s is None:
-            self.dt = datetime.datetime.now()
+            self.dt = None
         elif isinstance(s, int) or isinstance(s, float):
             self.dt = datetime.datetime.fromtimestamp(s)
         elif isinstance(s, str):
@@ -241,10 +246,17 @@ class date:
 
     def __str__(self):
         'always use ISO8601'
+        if not self.dt:
+            return ''
         return self.dt.strftime('%Y-%m-%d %H:%M:%S')
 
+    def __sub__(self, y):
+        if not self.dt or not y.dt:
+            return None
+        return (self.dt - y.dt).days
+
     def __lt__(self, a):
-        return self.dt < a.dt
+        return (self.dt or 0) < (a.dt or 0)
 
 
 def detectType(v):
@@ -598,12 +610,10 @@ class LazyColEval:
         return eval(exprstr, g_globals, self)
 
     def __getitem__(self, colname):
-        colnames = [c.name for c in self.sheet.columns]
-        if colname in colnames:
-            colidx = colnames.index(colname)
-            return self.sheet.columns[colidx].getValue(self.row)
-        else:
-            raise KeyError(colname)
+        for colidx, col in enumerate(self.sheet.columns):
+            if col._name == colname:
+                return self.sheet.columns[colidx].getValue(self.row)
+        raise KeyError(colname)
 
     def __getattr__(self, colname):
         return self.__getitem__(colname)
@@ -654,7 +664,7 @@ class Sheet:
         self.filetype = None
         self._selectedRows = {}  # id(row) -> row
 
-        self.filters = []  # list of expression strs to eval
+        self.include_filters = []  # list of expression strs to eval
 
         # list of modifications [sheet, funcname, [args], {kwargs}]
         self._editlog = []
@@ -666,12 +676,15 @@ class Sheet:
     def editlog(self, funcname, *args, **kwargs):
         self._editlog.append([self, funcname, args, kwargs])
 
-    def isFiltered(self, r):
-        'if any load filter returns true, the row is not loaded.'
-        return any(LazyColEval(self, r)(f) for f in self.filters)
+    def isIncluded(self, r):
+        'if any include filter returns false, the row is not loaded.'
+        if not self.include_filters:
+            return True
+        return any(LazyColEval(self, r)(f) for f in self.include_filters)
 
-    def addFilter(self, exprstr):
-        self.filters.append(exprstr)
+    def addIncludeFilter(self, exprstr):
+        self.include_filters.append(compile(exprstr, exprstr, 'eval', optimize=2))
+        status('added filter "%s"' % exprstr)
 
     def command(self, keystrokes, execstr, helpstr):
         self.commands[keystrokes] = (keystrokes, helpstr, execstr)
@@ -694,6 +707,9 @@ class Sheet:
         else:
             status('no reloader')
 
+    def delete(self, rowIndex):
+        row = self.rows.pop(rowIndex)
+
     def copy(self, suffix="'"):
         c = copy.copy(self)
         c.name += suffix
@@ -703,26 +719,41 @@ class Sheet:
         return c
 
     @async
-    def deleteSelected(self):
-        oldrows = self.rows
-        oldidx = self.cursorRowIndex
+    def substRegexSelected(self, regex, col, rows):
+        if not regex: return
 
-        row = None   # row to re-place cursor after
-        while oldidx < len(oldrows):
-            if not self.isSelected(oldrows[oldidx]):
-                row = self.rows[oldidx]
-                break
-            oldidx += 1
+        match_regex, replace_regex = regex.split('/')
+        compiled_regex = re.compile(match_regex)
 
-        self.rows = []
+        nsubs = 0
         self.progressMade = 0
-        self.progressTotal = len(oldrows)-1
-        for r in oldrows:
-            if not self.isSelected(r):
-                self.rows.append(r)
-                if r is row:
-                    self.cursorRowIndex = len(self.rows)-1
+        self.progressTotal = len(rows)
+        for r in rows:
+            oldval = col.getValue(r)
+            newval = re.sub(compiled_regex, replace_regex, oldval)
+            if newval != oldval:
+                col.setValue(r, newval)
+                nsubs += 1
+            self.progressTotal += 1
+        status('%d rows modified' % nsubs)
+
+    @async
+    def deleteSelected(self):
+        row = None   # row to re-place cursor after
+        for i in range(self.cursorRowIndex, len(self.rows)):
+            if not self.isSelected(self.rows[i]):
+                row = self.rows[i]
+                break
+
+        self.progressMade = 0
+        self.progressTotal = len(self.rows)-1
+        for i in range(len(self.rows)-1, 0, -1):
+            r = self.rows[i]
+            if self.isSelected(r):
+                self.delete(i)
             self.progressMade += 1
+
+        self.cursorRowIndex = self.rows.index(row)
 
         self._selectedRows.clear()
 
@@ -863,7 +894,7 @@ class Sheet:
     def select(self, rows, status=True):
         before = len(self._selectedRows)
         self.progressMade = 0
-        self.progressTotal = len(self.rows)
+        self.progressTotal = len(self.rows)  # self.rows because rows may be a generator
         for r in rows:
             self.progressMade += 1
             self.selectRow(r)
@@ -875,7 +906,7 @@ class Sheet:
     def unselect(self, rows, status=True):
         before = len(self._selectedRows)
         self.progressMade = 0
-        self.progressTotal = len(rows)
+        self.progressTotal = len(self.rows)  # self.rows because rows may be a generator
         for r in rows:
             self.progressMade += 1
             self.unselectRow(r)
@@ -891,6 +922,9 @@ class Sheet:
 
     def selectBy(self, func):
         self.select(r for r in self.rows if func(r))
+
+    def selectRowsMatching(self, col, val):
+        return self.selectBy(lambda r,c=col,v=val: c.getValue(r) == v)
 
     @property
     def selectedRows(self):
@@ -1089,7 +1123,7 @@ class Sheet:
                     elif isinstance(cellval, WrongTypeStr):
                         self.clipdraw(y, x+colwidth-len(options.ch_WrongType), options.ch_WrongType, colors[options.c_WrongType], len(options.ch_WrongType))
 
-                    if x+colwidth+len(sepchars) <= self.windowWidth:
+                    if sepchars and x+colwidth+len(sepchars) <= self.windowWidth:
                        self.scr.addstr(y, x+colwidth, sepchars, attr or colors[options.c_ColumnSep])
 
                     y += 1
@@ -1140,7 +1174,7 @@ def count(values):
     return len([x for x in values if x is not None])
 
 class Column:
-    def __init__(self, name, type=anytype, getter=lambda r: r, setter=None, width=None):
+    def __init__(self, name, type=anytype, getter=lambda r: r, setter=None, width=None, fmtstr=None):
         self.name = name      # use property setter from the get-go to strip spaces
         self.type = type      # anytype/str/int/float/date/func
         self.getter = getter  # getter(r)
@@ -1148,7 +1182,7 @@ class Column:
         self.width = width    # == 0 if hidden, None if auto-compute next time
         self.expr = None      # Python string expression if computed column
         self.aggregator = None # function to use on the list of column values when grouping
-        self.fmtstr = None
+        self.fmtstr = fmtstr
 
     def copy(self):
         return copy.copy(self)
@@ -1225,6 +1259,7 @@ class Column:
     def setValue(self, row, value):
         if self.setter:
             self.setter(row, value)
+            return True
         else:
             error('column cannot be changed')
 
@@ -1273,7 +1308,7 @@ def SubrowColumn(origcol, subrowidx, **kwargs):
 
 def combineColumns(cols):
     return Column("+".join(c.name for c in cols),
-                  getter=lambda r,cols=cols,ch=options.joinchar: ch.join(filter(None, (c.getValue(r) for c in cols))))
+                  getter=lambda r,cols=cols,ch=options.joinchar: ch.join(str(x) for x in filter(None, (c.getValue(r) for c in cols))))
 ###
 
 def input(prompt, type='', **kwargs):
@@ -1359,15 +1394,27 @@ class TextSheet(Sheet):
         else:
             error('unknown text type ' + str(type(self.source)))
 
+option('showHiddenFiles', False, 'if directory browser should include hidden files')
 class DirSheet(Sheet):
     'browses a directory, ENTER dives into the file'
     def reload(self):
-        self.rows = [(p, p.stat()) for p in self.source.iterdir()]  #  if not p.name.startswith('.')]
-        self.command(ENTER, 'vd.push(openSource(cursorRow[0]))', 'open file')  # path, filename
-        self.columns = [Column('filename', str, lambda r: r[0].name + r[0].ext),
-                      Column('type', str, lambda r: r[0].is_dir() and '/' or r[0].suffix),
-                      Column('size', int, lambda r: r[1].st_size),
-                      Column('mtime', date, lambda r: r[1].st_mtime)]
+        self.rows = [(p, p.stat()) for p in self.source.iterdir(hidden=options.showHiddenFiles)]
+        self.command(ENTER, 'vd.push(openSource(cursorRow[0]))', 'open file')
+
+        self.columns = [Column('filename', str, getter=lambda r: r[0].name + r[0].ext, setter=self.rename),
+                        Column('type', str, lambda r: r[0].is_dir() and '/' or r[0].ext[1:]),
+                        Column('size', int, lambda r: r[1].st_size),
+                        Column('mtime', date, lambda r: r[1].st_mtime)]
+
+    def rename(self, row, newfn):
+        os.rename(row[0].resolve(), newfn)
+        row[0].name # TODO: set pathname in row itself
+
+    def delete(self, rowIndex):
+        row = self.rows.pop(rowIndex)
+        fqpn = row[0].resolve()
+        os.remove(fqpn)
+        status('deleted %s' % fqpn)
 
 #### options management
 class OptionsObject:
@@ -1390,6 +1437,15 @@ class OptionsSheet(Sheet):
         self.columns = ArrayNamedColumns('option value default description'.split())
         self.command(ENTER, 'cursorRow[1] = editCell(1)', 'edit this option')
         self.command('e', 'cursorRow[1] = editCell(1)', 'edit this option')
+
+class IncludeFiltersSheet(Sheet):
+    def reload(self):
+        self.columns = [
+            Column('filter',
+                getter=lambda r: r.co_filename,
+                setter=lambda r,v,filts=self.source: filts.remove(r) or filts.append(compile(v, v, 'eval', optimize=2)))
+        ]
+        self.rows = self.source
 
 
 # each row is a Task object
@@ -1420,8 +1476,11 @@ def open_py(p):
 
 def open_txt(p):
     fp = p.open_text()
-    if '\t' in next(fp):
-        return open_tsv(p)  # TSV often have .txt extension
+    try:
+        if '\t' in next(fp):
+            return open_tsv(p)  # TSV often have .txt extension
+    except StopIteration:  # not even one full line in the file
+        pass
     return TextSheet(p.name, fp)  # leaks file handle
 
 def open_tsv(p):
@@ -1456,11 +1515,21 @@ def load_tsv(vs):
 
         vs.progressMade = 0
         vs.progressTotal = vs.source.filesize
-        for L in fp:
-            L = L[:-1]
-            if L:
-                vs.rows.append(L.split('\t'))
-            vs.progressMade += len(L)
+        if vs.include_filters:
+            for L in fp:
+                L = L[:-1]
+                if L:
+                    r = L.split('\t')
+                    if not vs.isFiltered(r):
+                        vs.rows.append(r)
+                vs.progressMade += len(L)
+        else:
+            for L in fp:
+                L = L[:-1]
+                if L:
+                    r = L.split('\t')
+                    vs.rows.append(r)
+                vs.progressMade += len(L)
 
     vs.progressMade = 0
     vs.progressTotal = 0
@@ -1616,13 +1685,19 @@ def wrapper(f, *args):
 class Path:
     '''Modeled after pathlib.Path.'''
     def __init__(self, fqpn):
-        self.fqpn = fqpn
-        fn = os.path.split(fqpn)[-1]
+        parts = os.path.split(fqpn)
+        self.dirs = parts[:-1]
+        fn = parts[-1]
         self.name, self.ext = os.path.splitext(fn)
-        self.suffix = self.ext[1:]
+        assert self.fqpn == fqpn, (self.dirs, self.fqpn, fqpn)
+
+    @property
+    def fqpn(self):
+        fnparts = self.dirs + (self.name+self.ext,)
+        return os.path.join(*fnparts)
 
     def open_text(self):
-        return open(self.resolve(), encoding=options.encoding, errors=options.encoding_errors)
+        return open(self.resolve(), encoding=options.encoding, errors=options.encoding_errors, newline=None)
 
     def read_text(self):
         with self.open_text() as fp:
@@ -1635,8 +1710,8 @@ class Path:
     def is_dir(self):
         return os.path.isdir(self.resolve())
 
-    def iterdir(self):
-        return [self.parent] + [Path(os.path.join(self.fqpn, f)) for f in os.listdir(self.resolve())]
+    def iterdir(self, hidden=True):
+        return [self.parent] + [Path(os.path.join(self.fqpn, f)) for f in os.listdir(self.resolve()) if hidden or not f.startswith('.')]
 
     def stat(self):
         return os.stat(self.resolve())
@@ -1664,14 +1739,14 @@ def openSource(p, filetype=None):
         else:
             return openSource(Path(p), filetype)  # convert to Path and recurse
     elif isinstance(p, Path):
-        if filetype is None:
-            filetype = p.suffix
+        if filetype is None and p.ext:
+            filetype = p.ext[1:]
 
         if os.path.isdir(p.resolve()):
             vs = DirSheet(p.name, p)
             filetype = 'dir'
         else:
-            openfunc = 'open_' + filetype.lower()
+            openfunc = 'open_' + (filetype or '').lower()
             if openfunc not in g_globals:
                 status('no %s function' % openfunc)
                 filetype = 'txt'

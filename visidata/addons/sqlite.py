@@ -4,7 +4,7 @@ def open_db(path):
     vs = SqliteSheet(path.name + '_tables', path, 'sqlite_master')
     vs.columns = vs.getColumns('sqlite_master')
     vs.command(ENTER, 'vd.push(SqliteSheet(joinSheetnames(source.name, cursorRow[1]), sheet, cursorRow[1]))', 'open this table')
-    vs.addFilter('type != "table"')
+    vs.addIncludeFilter("type == 'table'")
     return vs
 
 class SqliteSheet(Sheet):
@@ -19,13 +19,17 @@ class SqliteSheet(Sheet):
     def reload(self):
         tblname = self.sources[1]
         self.columns = self.getColumns(tblname)
-        r = self.conn.execute('SELECT COUNT(*) FROM %s' % tblname).fetchall()
+        sqlstr = 'SELECT COUNT(*) FROM %s' % tblname
+        r = self.conn.execute(sqlstr).fetchall()
         self.progressTotal = r[0][0]-1
         self.rows = []
-        for i, r in enumerate(self.conn.execute("SELECT * FROM %s" % tblname)):
+
+        sqlstr = 'SELECT * FROM %s' % tblname
+        if self.include_filters:
+            sqlstr += ' WHERE ' + ' AND '.join(f.co_filename for f in self.include_filters)
+        for i, r in enumerate(self.conn.execute(sqlstr)):
             self.progressMade = i
-            if not self.isFiltered(r):
-                self.rows.append(r)
+            self.rows.append(r)
 
     def getColumns(self, table_name):
         cols = []

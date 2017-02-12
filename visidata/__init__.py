@@ -10,6 +10,9 @@ from .addons.zip import *
 from .addons.xlsx import *
 from .addons.hdf5 import *
 from .addons.sqlite import *
+from .addons.bin import *
+from .addons.docx import *
+from .addons.dbf import *
 #from .addons.gsheets import *
 #from .addons.blaze import *
 

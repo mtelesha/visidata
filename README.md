@@ -64,6 +64,9 @@ On the `C`olumns sheet, these commands apply to rows (the columns of the source 
 - xlrd (if reading .xls files)
 - h5py and numpy (if opening .hdf5 files)
 - google-api-python-client (if opening Google Sheets; must [also set up OAuth credentials](https://developers.google.com/sheets/quickstart/python )
+- olefile (if opening .doc files)
+- python-docx (if opening .docx files)
+- dbfread (if opening .dbf files)
 
 **Remember to install the Python3 versions of these modules with e.g. `pip3`**
 
