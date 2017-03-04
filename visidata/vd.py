@@ -3,7 +3,7 @@
 # VisiData: a curses interface for exploring and arranging tabular data
 #
 
-__version__ = 'saul.pw/VisiData v0.42'
+__version__ = 'saul.pw/VisiData v0.45'
 __author__ = 'Saul Pwanson <vd@saul.pw>'
 __license__ = 'GPLv3'
 __status__ = 'Development'
@@ -52,7 +52,7 @@ option('encoding_errors', 'surrogateescape', 'as passed to codecs.open')
 
 option('joinchar', ' ', 'character used to join string fields')
 option('SubsheetSep', '~', 'string joining multiple sheet names')
-option('cmdhistThreshold_ms', 1, 'minimum amount of time taken before adding command to cmdhist')
+option('taskhistThreshold_ms', 1, 'minimum amount of time taken before adding command to taskhistory')
 option('timeout_ms', '100', 'curses timeout in ms')
 option('minTaskTime_s', 0.10, 'only keep tasks that take longer than this number of seconds')
 option('profile', True, 'profile async tasks')
@@ -115,7 +115,7 @@ command('gj', 'sheet.cursorRowIndex = len(rows); sheet.topRowIndex = cursorRowIn
 command('gl', 'sheet.cursorVisibleColIndex = len(visibleCols)-1', 'go to rightmost column')
 
 command('^G', 'status(statusLine)', 'show info for the current sheet')
-command('^V', 'status(__version__)', 'show version information')
+command('v', 'status(__version__)', 'show version information')
 
 command('t', 'sheet.topRowIndex = cursorRowIndex', 'scroll cursor row to top of screen')
 command('m', 'sheet.topRowIndex = cursorRowIndex-int(nVisibleRows/2)', 'scroll cursor row to middle of screen')
@@ -137,13 +137,13 @@ command(']', 'rows.sort(key=lambda r,col=cursorCol: col.getValue(r), reverse=Tru
 
 command('^D', 'options.debug = not options.debug; status("debug " + ("ON" if options.debug else "OFF"))', 'toggle debug mode')
 
-command('^E', 'vd.lastErrors and vd.push(TextSheet("last_error", vd.lastErrors[-1])) or status("no error")', 'open stack trace for most recent error')
+command('E', 'vd.lastErrors and vd.push(TextSheet("last_error", vd.lastErrors[-1])) or status("no error")', 'open stack trace for most recent error')
 
 command('^^', 'vd.sheets[0], vd.sheets[1] = vd.sheets[1], vd.sheets[0]', 'jump to previous sheet')
 command('^I',  'moveListItem(vd.sheets, 0, len(vd.sheets))', 'cycle through sheet stack') # TAB
 command('KEY_BTAB', 'moveListItem(vd.sheets, -1, 0)', 'reverse cycle through sheet stack')
 
-command('g^E', 'vd.push(TextSheet("last_errors", "\\n\\n".join(vd.lastErrors)))', 'open most recent errors')
+command('gE', 'vd.push(TextSheet("last_errors", "\\n\\n".join(vd.lastErrors)))', 'open most recent errors')
 
 command('R', 'sheet.filetype = input("change type to: ", value=sheet.filetype)', 'set source type of this sheet')
 command('^R', 'reload(); status("reloaded")', 'reload sheet from source')
@@ -164,8 +164,7 @@ command('$', 'cursorCol.type = str', 'set column type to string')
 command('%', 'cursorCol.type = float', 'set column type to float')
 command('~', 'cursorCol.type = detectType(cursorValue)', 'autodetect type of column by its data')
 
-command('^P', 'vd.status(vd.statusHistory[0])', 'show last status message again')
-command('g^P', 'vd.push(TextSheet("statuses", vd.statusHistory))', 'open last 100 statuses')
+command('^P', 'vd.push(TextSheet("statuses", vd.statusHistory))', 'open last 100 statuses')
 
 command('e', 'cursorCol.setValue(cursorRow, editCell(cursorVisibleColIndex))', 'edit this cell')
 command('c', 'searchColumnNameRegex(input("column name regex: ", "regex"))', 'go to visible column by regex of name')
@@ -175,7 +174,8 @@ command('ge', 'substRegexSelected(input(":s/", "regex"), cursorCol, selectedRows
 command('d', 'delete(cursorRowIndex)', 'delete this row')
 command('gd', 'deleteSelected()', 'delete all selected rows')
 
-command('o', 'vd.push(openSource(input("open: ", "filename")))', 'open local file or url')
+OPEN_KEY='o'
+command(OPEN_KEY, 'vd.push(openSource(input("open: ", "filename")))', 'open local file or url')
 command('^S', 'saveSheet(sheet, input("save to: ", "filename"))', 'save this sheet to new file')
 
 # slide rows/columns around
@@ -218,6 +218,14 @@ command('V', 'vd.push(TextSheet("%s[%s].%s" % (name, cursorRowIndex, cursorCol.n
 command('i', 'addIncludeFilter(input("include by expr: ", type="expr"))', 'add filter by Python expression')
 command('I', 'vd.push(IncludeFiltersSheet("include_filters", include_filters))', 'push filters sheet')
 
+#command('f', '', 'freeze this column (set values to calculated result)')
+#command('gf', '', 'freeze all columns')
+
+#command('.', 'sheet.replayCommands([vd.commandHistory[-1]])', 're-execute previous command')
+command('ga', 'vd.replayCommands(rows)', 'replay all commands on this sheet')
+command('`', 'vd.push(source)', 'push source of this sheet')
+command('+', 'status("sum(%s)=%s" % (cursorCol.name, sum(cursorCol.values(rows))))', 'sum this column')
+
 # VisiData uses Python native int, float, str, and adds a simple date and anytype.
 #
 # A type T is used internally in these ways:
@@ -245,10 +253,14 @@ class date:
             self.dt = s
 
     def __str__(self):
-        'always use ISO8601'
+        'returns ISO8601 formatted date with time if not midnight'
         if not self.dt:
             return ''
-        return self.dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        datestr = self.dt.strftime('%Y-%m-%d')
+        if self.dt.second or self.dt.hour or self.dt.minute:
+            datestr += self.dt.strftime(' %H:%M:%S')
+        return datestr
 
     def __sub__(self, y):
         if not self.dt or not y.dt:
@@ -324,15 +336,22 @@ class VisiData:
 
     def __init__(self):
         self.sheets = []
+        self.commandHistory = []  # keystrokes pressed
         self.statusHistory = []
         self._status = [__version__]  # statuses shown until next action
         self.lastErrors = []
         self.lastRegex = None
-        self.lastInputs = collections.defaultdict(collections.OrderedDict)  # [input_type] -> prevInputs
-        self.cmdhistory = []  # list of [keystrokes, start_time, end_time, thread, notes]
-        self.keystrokes = ''
-        self.inInput = False
-        self.tasks = []
+
+        # histories of results from each of the input(type="input_type") calls
+        # OrderedDict used as a poor man's OrderedSet
+        # ["input_type"] -> { "input_result": "input_result" }
+        self.lastInputs = collections.defaultdict(collections.OrderedDict)
+        self.keystrokes = ''  # current command being constructed
+        self.tasks = []  # list of Task objects
+
+    @property
+    def activeTasks(self):
+        return [task for task in list(self.tasks) if not task.endTime]
 
     def status(self, s):
         strs = str(s)
@@ -342,8 +361,11 @@ class VisiData:
         return s
 
     def editText(self, y, x, w, **kwargs):
-        v = editText(self.scr, y, x, w, **kwargs)
-        self.status('"%s"' % v)
+        v = self.commandHistory[-1][2]
+        if v is None:
+            v = editText(self.scr, y, x, w, **kwargs)
+            self.commandHistory[-1][2] = v
+            self.status('"%s"' % v)
         return v
 
     def getkeystroke(self):
@@ -492,14 +514,58 @@ class VisiData:
                 except Exception:
                     self.exceptionCaught()
             else:
+                vd().commandHistory.append([sheet.name, self.keystrokes, None])
                 sheet.exec_keystrokes(g_globals, self.keystrokes)
 
-            for i, task in list(enumerate(self.tasks)):
-                if not task.endTime and not task.thread.is_alive():
-                    task.endTime = time.process_time()
-                    task.status += 'ended'
-                    if task.elapsed_s < float(options.minTaskTime_s):
-                        self.tasks.remove(task)
+            self.checkActiveTasks()
+            sheet.checkCursor()
+
+    def checkActiveTasks(self):
+        for task in self.activeTasks:
+            if not task.thread.is_alive():
+                task.endTime = time.process_time()  # setting endTime marks it inactive
+                task.status += 'ended'
+                if task.elapsed_s < float(options.minTaskTime_s):
+                    self.tasks.remove(task)
+
+    def findSheetByName(self, name):
+        sheets = [s for s in self.sheets if s.name == name]
+        if not sheets:
+            return None
+        elif len(sheets) > 1:
+            status('more than one sheet named %s' % name)
+        return sheets[0]
+
+    def replayCommands(self, cmdrows):
+        sheet = self.sheets[0]
+        for sheetname, keystrokes, extra_input in cmdrows:
+            if sheetname:
+                if sheet.name != sheetname:
+                    vs = self.findSheetByName(sheetname)
+                    if vs:
+                        self.push(vs)
+                        sheet = vs
+                        status('changed to sheet %s' % sheetname)
+                    else:
+                        status('no sheet named %s' % sheetname)
+                        continue
+            else:
+                assert keystrokes == OPEN_KEY
+
+            sheet.draw(self.scr)
+            self.drawLeftStatus(sheet)
+            vd().commandHistory.append([sheetname, keystrokes, extra_input])
+            sheet.exec_keystrokes(g_globals, keystrokes)
+
+            # wait for tasks to complete
+            i = 0
+            while self.activeTasks:
+                self.drawRightStatus()
+                time.sleep(1)  # yield to other threads
+                self.checkActiveTasks()
+                i += 1
+                if i > 30:
+                    raise Exception("too long")
 
             sheet.checkCursor()
 
@@ -523,7 +589,7 @@ class VisiData:
 
 # define @async for potentially long-running functions
 #   when function is called, instead launches a thread
-#   adds a row to cmdhistory
+#   adds a row to tasks
 #   ENTER on that row pushes a profile of the thread
 
 class Task:
@@ -594,7 +660,7 @@ def ctype_async_raise(thread_obj, exception):
     status('sent exception to %s' % thread_obj.name)
 
 command('^C', 'ctype_async_raise(vd.tasks[-1].thread, EscapeException)', 'cancel most recent task')
-command('^T', 'vd.push(TasksSheet("task_history", vd.tasks))', 'push task history sheet')
+command('T', 'vd.push(TasksSheet("task_history", vd.tasks))', 'push task history sheet')
 
 
 class LazyColEval:
@@ -642,6 +708,8 @@ class Sheet:
     def __init__(self, name, *sources, columns=None):
         self.name = name
         self.sources = sources
+        self.windowHeight = 25   # set by draw()
+        self.windowWidth = 80    # set by draw()
 
         self.rows = []           # list of opaque row objects
         self.cursorRowIndex = 0  # absolute index of cursor into self.rows
@@ -714,7 +782,7 @@ class Sheet:
         c = copy.copy(self)
         c.name += suffix
         c.topRowIndex = c.cursorRowIndex = 0
-        c.columns = copy.deepcopy(self.columns)  # deepcopy so that layouts can be different
+        c.columns = [copy.copy(col) for col in self.columns]  # one-level deeper copy so that layouts can be different
         c._selectedRows = self._selectedRows.copy()  # so that selections on source don't affect the copy and vice versa
         return c
 
@@ -941,6 +1009,8 @@ class Sheet:
 
     def cursorDown(self, n):
         self.cursorRowIndex += n
+        vd().commandHistory[-1][1] = 'r'
+        vd().commandHistory[-1][2] = str(self.cursorRowIndex)
 
     def cursorRight(self, n):
         self.cursorVisibleColIndex += n
@@ -1088,6 +1158,7 @@ class Sheet:
 
         self.rowLayout = {}
         self.calcColLayout()
+        vcolidx = 0
         for vcolidx, colinfo in sorted(self.visibleColLayout.items()):
             x, colwidth = colinfo
             if x < self.windowWidth:  # only draw inside window
@@ -1169,6 +1240,9 @@ def distinct(values):
 def avg(values):
     return float(sum(values))/len(values)
 mean=avg
+
+def mode(values):
+    return collections.Counter(values).most_common(1)
 
 def count(values):
     return len([x for x in values if x is not None])
@@ -1324,9 +1398,7 @@ def _inputLine(prompt, **kwargs):
     scr = vd().scr
     windowHeight, windowWidth = scr.getmaxyx()
     scr.addstr(windowHeight-1, 0, prompt)
-    vd().inInput = True
     ret = vd().editText(windowHeight-1, len(prompt), windowWidth-len(prompt)-8, attr=colors[options.c_EditCell], unprintablechar=options.ch_Unprintable, **kwargs)
-    vd().inInput = False
     return ret
 
 def saveSheet(vs, fn):
@@ -1393,6 +1465,7 @@ class TextSheet(Sheet):
             self.rows = [L[:-1] for L in self.source]
         else:
             error('unknown text type ' + str(type(self.source)))
+
 
 option('showHiddenFiles', False, 'if directory browser should include hidden files')
 class DirSheet(Sheet):
@@ -1466,8 +1539,7 @@ def ProfileSheet(task):
 #### enable external addons
 def open_vd(p):
     vs = open_tsv(p)
-    vs.reload()
-    return vd
+    return vs
 
 def open_py(p):
     contents = p.read_text()
@@ -1752,6 +1824,7 @@ def openSource(p, filetype=None):
                 filetype = 'txt'
                 openfunc = 'open_txt'
             vs = g_globals[openfunc](p)
+            vd().commandHistory.append(['', OPEN_KEY, str(p)])
     else:  # some other object
         status('unknown object type %s' % type(p))
         vs = None

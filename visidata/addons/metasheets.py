@@ -20,6 +20,7 @@ option('maxsplit', -1, 'string.split limit')
 def splitColumn(columns, colIndex, origcol, exampleVal, ch):
     maxsplit = int(options.maxsplit)
 
+    # find number of columns from the example
     if ch:
         maxcols = len(exampleVal.split(ch, maxsplit))
     else:
@@ -28,11 +29,15 @@ def splitColumn(columns, colIndex, origcol, exampleVal, ch):
     if maxcols <= 1:
         return status('move cursor to valid example row to split by this column')
 
-    for i in range(maxcols):
+    # generates that number of columns indexed into the split() tuple
+    for splitNum in range(maxcols):
         if ch:
-            columns.insert(colIndex+i+1, (Column("%s[%s]" % (origcol.name, i), getter=lambda r,c=origcol,ch=ch,i=i,maxsplit=maxsplit: c.getValue(r).split(ch, maxsplit)[i])))
+            c = Column("%s[%s]" % (origcol.name, splitNum),
+                    getter=lambda r,c=origcol,ch=ch,splitNum=splitNum,maxsplit=maxsplit: c.getValue(r).split(ch, maxsplit)[splitNum])
         else:
-            columns.insert(colIndex+i+1, (Column("%s[%s]" % (origcol.name, i), getter=lambda r,c=origcol,ch=ch,i=i,maxsplit=maxsplit: c.getValue(r)[i])))
+            c = Column("%s[%s]" % (origcol.name, splitNum),
+                    getter=lambda r,c=origcol,ch=ch,splitNum=splitNum,maxsplit=maxsplit: c.getValue(r)[splitNum])
+        columns.insert(colIndex+splitNum+1, c)
 
 
 def ColumnExpr(sheet, expr):
@@ -52,9 +57,9 @@ class SheetsSheet(SheetList):
         self.rows = vd().sheets
         self.command(ENTER, 'moveListItem(vd.sheets, cursorRowIndex, 0); vd.sheets.pop(1)', 'jump to this sheet')
         self.command('&', 'vd.replace(SheetJoin(selectedRows, jointype="&"))', 'open inner join of selected sheets')
-        self.command('+', 'vd.replace(SheetJoin(selectedRows, jointype="+"))', 'open outer join of selected sheets')
+        self.command('+', 'vd.replace(SheetJoin(selectedRows, jointype="+"))', 'open outer join of selected sheets (all rows from top sheet)')
         self.command('*', 'vd.replace(SheetJoin(selectedRows, jointype="*"))', 'open full join of selected sheets')
-        self.command('~', 'vd.replace(SheetJoin(selectedRows, jointype="~"))', 'open diff join of selected sheets')
+        self.command('~', 'vd.replace(SheetJoin(selectedRows, jointype="~"))', 'open diff join of selected sheets (all those without full matches)')
 
 
 class SheetColumns(Sheet):
@@ -102,6 +107,18 @@ class SheetColumns(Sheet):
                 Column('stddev', float, lambda c,sheet=self: statistics.stdev(c.values(sheet.rows)), width=0),
             ])
 
+command('Y', 'vd.push(SheetCommandRoll(sheet.name+".vd", vd.commandHistory[:-1]))', 'push sheet of complete current command history')
+class SheetCommandRoll(Sheet):
+    def __init__(self, name, src):
+        super().__init__(name, src)
+        self.filetype = 'vd'
+        self.columns = [ ColumnItem('sheet', 0),
+                         ColumnItem('keystrokes', 1),
+                         ColumnItem('extra_input', 2),
+                       ]
+    def reload(self):
+        self.rows = self.source
+        return self
 
 #### slicing and dicing
 class SheetJoin(Sheet):
@@ -118,8 +135,8 @@ class SheetJoin(Sheet):
         self.columns = [SubrowColumn(ColumnItem(c.name, i), 0) for i, c in enumerate(sheets[0].columns[:sheets[0].nKeys])]
         self.nKeys = sheets[0].nKeys
 
-        rowsBySheetKey = {}
-        rowsByKey = {}
+        rowsBySheetKey = {}  # <Sheet>: { (key,tuple): [ row1, ... ], ... }
+        rowsByKey = {}  # (key,tuple): [(key,tuple), [sheet1_row1, ...], [sheet2_row2, ...], ...]
 
         self.progressMade = 0
         self.progressTotal = sum(len(vs.rows) for vs in sheets)*2
@@ -129,7 +146,10 @@ class SheetJoin(Sheet):
             for r in vs.rows:
                 self.progressMade += 1
                 key = tuple(c.getValue(r) for c in vs.keyCols)
-                rowsBySheetKey[vs][key] = r
+                if key not in rowsBySheetKey[vs]:
+                    rowsBySheetKey[vs][key] = [r]
+                else:
+                    rowsBySheetKey[vs][key].append(r)
 
         for sheetnum, vs in enumerate(sheets):
             # subsequent elements are the rows from each source, in order of the source sheets
@@ -138,7 +158,7 @@ class SheetJoin(Sheet):
                 self.progressMade += 1
                 key = tuple(str(c.getValue(r)) for c in vs.keyCols)
                 if key not in rowsByKey:
-                    rowsByKey[key] = [key] + [rowsBySheetKey[vs2].get(key) for vs2 in sheets]  # combinedRow
+                    rowsByKey[key] = [[key]] + [rowsBySheetKey[vs2].get(key) for vs2 in sheets]  # combinedRow
 
         self.rows = []
         self.progressMade = 0
@@ -146,18 +166,25 @@ class SheetJoin(Sheet):
 
         for k, combinedRow in rowsByKey.items():
             self.progressMade += 1
-
             if self.jointype == '*':  # full join (keep all rows from all sheets)
-                self.rows.append(combinedRow)
+                for sheetnum, vs in enumerate(sheets):
+                    srcrows = combinedRow[sheetnum+1]
+                    if srcrows:
+                        for r in srcrows:
+                            self.rows.append([key, r] + [x[0] if x else None for x in combinedRow[2:]])
 
             elif self.jointype == '&':  # inner join  (only rows with matching key on all sheets)
+                combinedRow = list(x[0] if x else None for x in combinedRow)
                 if all(combinedRow):
-                    self.rows.append(combinedRow)
+                    for r in combinedRow[1]:
+                        self.rows.append([key, r] + [x[0] if x else None for x in combinedRow[2:]])
 
             elif self.jointype == '+':  # outer join (all rows from first sheet)
+                combinedRow = list(x[0] if x else None for x in combinedRow)
                 if combinedRow[1]:
                     self.rows.append(combinedRow)
 
             elif self.jointype == '~':  # diff join (only rows without matching key on all sheets)
+                combinedRow = list(x[0] if x else None for x in combinedRow)
                 if not all(combinedRow):
                     self.rows.append(combinedRow)

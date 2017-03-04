@@ -1,5 +1,7 @@
 *.?sv
+*.pyc
 __pycache__
 .tox/
 .idea/
+dist/
 visidata.egg-info/
