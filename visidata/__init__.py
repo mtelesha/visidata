@@ -13,6 +13,7 @@ from .addons.sqlite import *
 from .addons.bin import *
 from .addons.docx import *
 from .addons.dbf import *
+from .addons.pcap import *
 #from .addons.gsheets import *
 #from .addons.blaze import *
 

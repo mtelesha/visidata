@@ -5,5 +5,6 @@ h5py
 numpy
 olefile
 dbfread
+pyshark
 google-api-python-client
 
