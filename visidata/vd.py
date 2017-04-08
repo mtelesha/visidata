@@ -285,8 +285,8 @@ typemap = {
     anytype: ' ',
 }
 
-windowWidth = None
-windowHeight = None
+windowWidth = 80
+windowHeight = 25
 
 def joinSheetnames(*sheetnames):
     return options.SubsheetSep.join(str(x) for x in sheetnames)
@@ -1526,11 +1526,13 @@ def load_tsv(vs):
 
         vs.progressMade = 0
         vs.progressTotal = vs.source.filesize
+        vs.rows = TsvRowsIndex(vs.source)
+        lineStart = fp.tell()
         for L in fp:
-            L = L[:-1]
+            currentPos = fp.tell()
             if L:
-                vs.rows.append(L.split('\t'))
-            vs.progressMade += len(L)
+                rows.append((lineStart, currentPos))
+            vs.progressMade = currentPos
 
     vs.progressMade = 0
     vs.progressTotal = 0
@@ -1551,6 +1553,22 @@ def save_tsv(vs, fn):
             vs.progressMade += 1
             fp.write('\t'.join(col.getDisplayValue(r) for col in vs.visibleCols) + '\n')
     status('%s save finished' % fn)
+
+class TsvRowsIndex(list):
+    def __init__(self, fp):
+        self.fp = fp
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+          for (i in range(key.start, key.stop, key.step)):
+            item = super().__getitem__(key)
+            getRow(i)
+        if item:
+            lineStart, lineEnd = item
+            self.fp.seek(lineStart)
+            line = self.fp.read(lineEnd - lineStart)
+            row = line.split('\t')
+            return row
 
 ### curses helpers
 
